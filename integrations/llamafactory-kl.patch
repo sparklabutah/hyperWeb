@@ -1,0 +1,401 @@
+--- a/src/llamafactory/data/processor/tw_token_weights.py
++++ b/src/llamafactory/data/processor/tw_token_weights.py
+@@ -35,6 +35,10 @@
+     TW_TOKEN_WEIGHT_NORM=batch|window|count           loss normaliser; default "batch"
+     TW_TOKEN_WEIGHTS_STRICT=0                         downgrade "response not in the side-car"
+                                                       from an error to "weight 1 everywhere"
++    TW_KL_DISJOINT=1                                  ablation K (off-domain KL anchor, ROW-disjoint
++                                                      CE/KL -- see disjoint_kl_loss below). Default
++                                                      off; requires TW_KL_GAMMA_WEIGHTS or the
++                                                      trainer refuses to start.
+ 
+ ``TW_TOKEN_WEIGHTS`` and ``TW_SURGICAL_MASK`` are independent: the surgical path is untouched, and
+ setting both is refused (they would both rewrite the same labels).
+@@ -118,10 +122,19 @@
+ DEFAULT_FLOOR = 0.1
+ MAX_WEIGHT = 1.0
+ 
++# The KL role mask (gamma) is a BINARY selector (0 = "own", not anchored; 1 = "anchor"), not a
++# fractional CE weight, so it must not inherit the CE weighting's floor -- a floor of 0.1 would
++# turn an intended gamma of exactly 0 into 0.1, i.e. every "own" row would leak a tenth of an
++# anchor penalty (ablation K, scout_task_plan.md 10.2/10.3). See resolve_floor()'s `default` arg
++# and target_kl_gamma()'s call into target_token_weights() below.
++GAMMA_DEFAULT_FLOOR = 0.0
++
+ ENV_WEIGHTS = "TW_TOKEN_WEIGHTS"
+ ENV_FLOOR = "TW_TOKEN_WEIGHT_FLOOR"
+ ENV_NORM = "TW_TOKEN_WEIGHT_NORM"
+ ENV_STRICT = "TW_TOKEN_WEIGHTS_STRICT"
++ENV_KL_DISJOINT = "TW_KL_DISJOINT"
++ENV_KL_TAIL_LOGITS = "TW_KL_TAIL_LOGITS"
+ 
+ _TABLE = None
+ # How many template-inserted tokens may precede the assistant content inside the encoded response.
+@@ -165,8 +178,16 @@
+     return value
+ 
+ 
+-def resolve_floor(entry: Optional[dict] = None, meta: Optional[dict] = None) -> float:
+-    r"""Floor precedence: env var > per-entry "floor" > side-car "floor" > DEFAULT_FLOOR."""
++def resolve_floor(entry: Optional[dict] = None, meta: Optional[dict] = None, default: float = DEFAULT_FLOOR) -> float:
++    r"""Floor precedence: env var > per-entry "floor" > side-car "floor" > `default`.
++
++    `default` lets a caller pick what "nobody said otherwise" means -- the CE weighting side-car
++    wants DEFAULT_FLOOR (0.1, the historical behaviour, unchanged), the KL gamma side-car wants
++    GAMMA_DEFAULT_FLOOR (0.0, gamma is a 0/1 selector and a resurrected 0 is a silent anchor leak
++    into every "own" row). ``TW_TOKEN_WEIGHT_FLOOR`` still overrides either, on purpose: it is the
++    one operator knob that must keep working exactly as before for the CE weighting side-car this
++    module already ships. Nothing K1 does sets it, so the gamma side-car never sees it in practice.
++    """
+     value = env_floor()
+     if value is not None:
+         return value
+@@ -177,7 +198,7 @@
+     if meta is not None and meta.get("floor") is not None:
+         return float(meta["floor"])
+ 
+-    return DEFAULT_FLOOR
++    return default
+ 
+ 
+ # --------------------------------------------------------------------------------------- table
+@@ -236,6 +257,71 @@
+     return bool(os.environ.get(ENV_KL_GAMMA, "").strip())
+ 
+ 
++def kl_disjoint_enabled() -> bool:
++    r"""True only when TW_KL_DISJOINT=1 (ablation K, scout_task_plan.md 10.2). Default off, and off
++    reproduces the pre-existing ``_tw_kl_compute_loss`` formula exactly (see ``disjoint_kl_loss``)."""
++    return os.environ.get(ENV_KL_DISJOINT, "0") == "1"
++
++
++def kl_tail_logits_enabled() -> bool:
++    r"""True only when TW_KL_TAIL_LOGITS=1. Default off: the KL path then asks the model for
++    full-sequence logits exactly as it always did."""
++    return os.environ.get(ENV_KL_TAIL_LOGITS, "0") == "1"
++
++
++def supervised_tail_start(labels, ignore_index: int = IGNORE_INDEX) -> int:
++    r"""Index of the first position whose LOGITS the loss needs, for a (B, T) label tensor.
++
++    The logits at position t predict token t+1, so a first supervised token at position f needs the
++    logits from f-1. Returned is ``max(min_over_rows(f) - 1, 0)``; keeping positions ``start..T-1``
++    (``logits_to_keep = T - start``) and cutting labels to ``labels[..., start:]`` leaves the usual
++    ``logits[..., :-1, :]`` / ``labels[..., 1:]`` shift aligned, and every supervised token keeps the
++    logits it had with the full sequence. A row with NO supervised token returns 0 (keep everything):
++    the conservative answer, and the caller's existing "no labels" errors still fire.
++    """
++    sup = labels.ne(ignore_index)
++    if sup.dim() == 1:
++        sup = sup.unsqueeze(0)
++    if not bool(sup.any(dim=-1).all()):
++        return 0
++    first = int(sup.float().argmax(dim=-1).min().item())
++    return max(first - 1, 0)
++
++
++def assert_disjoint_requires_gamma(
++    disjoint_enabled: bool, gamma_col_enabled: bool, beta: float = 0.0
++) -> None:
++    r"""Refuse ``TW_KL_DISJOINT=1`` without ``TW_KL_GAMMA_WEIGHTS``, or without a positive
++    ``TW_KL_BETA`` (``beta``, the trainer's own ``self._tw_kl_beta``).
++
++    Disjoint mode classifies each ROW as "CE" or "KL" from ``gamma.sum(row) > 0``; without a real
++    gamma side-car there is no such signal, and the trainer would either crash on a missing column
++    or (worse, if some other gamma source were ever wired in silently) mis-route every row as a CE
++    row -- a run that trains and looks clean while never anchoring anything. Fail at construction,
++    not three days into training.
++
++    The beta check closes a SEPARATE path to the same failure: ``compute_loss`` only enters
++    ``_tw_kl_compute_loss`` (and therefore the disjoint branch) when ``self._tw_kl_beta > 0.0`` --
++    see ``trainer.py``'s ``compute_loss``. A ``TW_KL_DISJOINT=1`` config with a real gamma side-car
++    but ``TW_KL_BETA`` unset or ``<= 0`` would construct without error and then train every row,
++    including the ones the side-car marks anchor-only, at plain uniform CE -- the exact "anchor row
++    trains at full CE strength" regression this whole feature exists to close, reached by never
++    calling the disjoint loss at all rather than by miscomputing it.
++    """
++    if disjoint_enabled and not gamma_col_enabled:
++        raise ValueError(
++            f"{ENV_KL_DISJOINT}=1 requires {ENV_KL_GAMMA} (the per-row/per-token anchor mask); "
++            "without it there is no way to tell a CE row from a KL row"
++        )
++    if disjoint_enabled and beta <= 0.0:
++        raise ValueError(
++            f"{ENV_KL_DISJOINT}=1 requires TW_KL_BETA > 0 (got {beta!r}); a beta-less/zero-beta "
++            "disjoint config never reaches the disjoint loss branch (compute_loss only calls it "
++            "when beta > 0) and would silently train every row, anchor rows included, at plain "
++            "uniform CE"
++        )
++
++
+ def _gamma_table() -> tuple[dict, dict]:
+     global _GTABLE, _GTABLE_META, _GTABLE_PATH
+     path = os.environ[ENV_KL_GAMMA]
+@@ -262,12 +348,32 @@
+     r"""gamma_i for one assistant turn, from the role-mask side-car.
+ 
+     Returns ONLY the weights: the labels this shares with the CE path must not be touched twice, and
+-    a role mask never means "do not train this token" (its unanchored value is a strictly positive
+-    epsilon precisely so the reader's ``w<=0 -> label=-100`` rule cannot fire). Any label change
+-    coming back from the shared span->token code is therefore discarded here by construction.
++    a role mask never means "do not train this token". Any label change coming back from the shared
++    span->token code is therefore discarded here by construction.
++
++    Two args steer the shared span->token machinery away from CE-weighting behaviour that gamma must
++    not inherit:
++
++    * ``default_floor=GAMMA_DEFAULT_FLOOR`` (0.0, not the CE table's 0.1) -- gamma is a 0/1 anchor
++      selector, and a nonzero floor would resurrect an intended gamma of exactly 0 (ablation K,
++      scout_task_plan.md 10.2/10.3: an "own" row's whole gamma vector is 0).
++    * ``require_supervision=False`` -- the shared code also refuses "every label of this sample is
++      masked" (a real problem for the CE column: such a sample has nothing to learn from). A
++      gamma-vector of all zeros is exactly what a legitimate "own" row IS, not an empty sample, so
++      that refusal must not fire here. Whether K1's own rows carry a strict 0 or a positive epsilon
++      is a data-builder decision (see ``scripts/build_offdomain_anchor.py``); this function supports
++      either.
+     """
++    # Both relaxations are gated on TW_KL_DISJOINT so that, with the switch OFF, this call is
++    # argument-for-argument what it was before ablation K existed (DEFAULT_FLOOR, supervision
++    # required). Every shipped role-mask side-car pins "floor": 0.0 itself, so this gate changes no
++    # existing recipe; it exists so "switch off == unchanged" is a property of the code, not of the
++    # side-cars that happen to be on disk.
++    disjoint = kl_disjoint_enabled()
+     weights, _labels = target_token_weights(
+-        tokenizer, content, target_ids, target_label, tables=_gamma_table()
++        tokenizer, content, target_ids, target_label, tables=_gamma_table(),
++        default_floor=GAMMA_DEFAULT_FLOOR if disjoint else DEFAULT_FLOOR,
++        require_supervision=not disjoint,
+     )
+     return weights
+ 
+@@ -375,7 +481,8 @@
+ 
+ # ------------------------------------------------------------------------------- train-time API
+ def target_token_weights(
+-    tokenizer, content: str, target_ids: list[int], target_label: list[int], tables=None
++    tokenizer, content: str, target_ids: list[int], target_label: list[int], tables=None,
++    default_floor: float = DEFAULT_FLOOR, require_supervision: bool = True,
+ ) -> tuple[list[float], list[int]]:
+     r"""Return ``(weights, labels)`` for one assistant turn.
+ 
+@@ -385,6 +492,21 @@
+     ``envelope_weight``, 1.0 by default: the stop signal is not a "component" of the answer, so it
+     is fully trained in every arm. Set ``envelope_weight`` in the side-car to make it follow the
+     corpus's ``default_weight`` instead.
++
++    ``default_floor`` is the floor used when neither the environment, the entry nor the side-car's
++    own meta names one (see ``resolve_floor``). The CE weighting table wants ``DEFAULT_FLOOR``
++    (unchanged); ``target_kl_gamma`` calls in with ``GAMMA_DEFAULT_FLOOR`` (0.0) because gamma is a
++    0/1 anchor selector, not a fractional CE weight, and a nonzero floor would resurrect an intended
++    gamma of exactly 0.
++
++    ``require_supervision`` guards the "every label of this sample is masked" refusal below. For the
++    CE weighting table an all-zero-weight sample really has nothing to learn from and must be caught
++    upstream (the default, unchanged). For the KL gamma table an all-ZERO row is exactly an "own"
++    (unanchored) row -- a legitimate, common encoding, not an empty sample -- so ``target_kl_gamma``
++    passes ``require_supervision=False``. Either way the LABELS this computes are only ever used by
++    the CE weighting caller: ``target_kl_gamma`` discards them by construction (a role mask never
++    means "do not train this token"), so relaxing this guard for gamma changes no label anyone trains
++    on.
+     """
+     table, meta = tables if tables is not None else _current_table()
+     entry = table.get(content_key(content))
+@@ -401,7 +523,7 @@
+     if "len" in entry and entry["len"] != len(content):
+         raise ValueError("token weights: SHA1 hit but content length differs -- stale side-car?")
+ 
+-    floor = resolve_floor(entry, meta)
++    floor = resolve_floor(entry, meta, default=default_floor)
+     default_weight = float(entry.get("default_weight", meta.get("default_weight", 1.0)))
+     envelope_weight = float(entry.get("envelope_weight", meta.get("envelope_weight", 1.0)))
+     spans = flatten_weight_spans(entry.get("weight_spans") or [])
+@@ -467,7 +589,7 @@
+         if label == IGNORE_INDEX:
+             weights[i] = 0.0
+ 
+-    if all(label == IGNORE_INDEX for label in labels):
++    if require_supervision and all(label == IGNORE_INDEX for label in labels):
+         raise ValueError("token weights: every label of this sample is masked -- such samples must be dropped")
+ 
+     return weights, labels
+@@ -541,6 +663,83 @@
+     return numerator / torch.clamp(denominator, min=1e-8)
+ 
+ 
++# --------------------------------------------------------------------------- KL disjoint (ablation K)
++def disjoint_kl_loss(
++    logp: "torch.Tensor",
++    ref_logp: "torch.Tensor",
++    mask: "torch.Tensor",
++    gamma: Optional["torch.Tensor"],
++    ce_weights: Optional["torch.Tensor"],
++    beta: float,
++) -> tuple["torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor"]:
++    r"""The off-domain KL anchor loss, DISJOINT per row (scout_task_plan.md 10.2).
++
++    ``LLaMA-Factory .../sft/trainer.py:_tw_kl_compute_loss`` normalises CE by the micro-batch's
++    WEIGHT SUM. With ``per_device_train_batch_size=1`` an "anchor" row whose CE weights are all some
++    epsilon has ``w.sum() = n*epsilon``, the epsilon cancels, and the row trains at full CE strength
++    -- the anchored adapter would silently become a pooled one (the exact regression
++    ``tests/test_kl_disjoint.py`` pins). This function instead classifies each ROW (sample) as CE-only
++    or KL-only from its own gamma:
++
++        row has ANY anchored token (gamma.sum(row) > 0)  ->  KL row: contributes KL only, no CE
++        row has none                                     ->  CE row: contributes CE only, no KL
++
++    A "row" is dimension 0 (one training example in the micro-batch), matching the plan's "an anchor
++    row" language: gamma is per-token but the row/CE-or-KL classification is per-sample.
++
++    Parameters
++    ----------
++    logp, ref_logp : (B, T) log p(target) under the student / the frozen reference, already causal
++        shifted (see ``CustomSeq2SeqTrainer._tw_target_logprobs``).
++    mask : (B, T) bool, the causal-shifted supervised-token mask (``shift_labels.ne(IGNORE_INDEX)``).
++    gamma : (B, T) float or None, the causal-shifted KL role mask (``kl_gamma[..., 1:]``). None is
++        treated as "no anchored token anywhere", i.e. every row is a CE row. It is unreachable in
++        practice: ``assert_disjoint_requires_gamma`` refuses to construct the trainer without a gamma
++        side-car, and the trainer raises if a batch then lacks the ``kl_gamma`` column.
++    ce_weights : (B, T) float or None, an optional per-token CE weight for the CE rows (None = uniform
++        CE, which is what K1 uses -- the dose lives in row COUNT via the corpus builder, not in a
++        per-token weight).
++    beta : the anchor coefficient (``TW_KL_BETA``).
++
++    Returns
++    -------
++    (loss, ce, kl_term, n_ce_rows, n_kl_rows)
++
++    ``ce`` is the mean CE over the CE rows' supervised tokens: a GRAPH-CONNECTED zero when there are
++    no CE rows in the micro-batch (an all-anchor batch), because the numerator is then exactly zero
++    and the denominator is clamped away from zero -- there is no branch, so ``ce`` stays
++    differentiable and on the right device/dtype even when it contributes nothing. ``kl_term`` is
++    ``sum(k3 * gamma) / sum(gamma)`` restricted to the KL rows, with the SAME clamp
++    ``_tw_kl_compute_loss`` already uses, zero (same graph-connected way) when there are no KL rows.
++    ``loss = ce + beta * kl_term``. ``n_ce_rows``/``n_kl_rows`` are per-micro-batch counts, for the
++    ``ce_rows=`` / ``kl_rows=`` step log.
++    """
++    import torch
++
++    mask_f = mask.float()
++    g = torch.zeros_like(mask_f) if gamma is None else (gamma.float() * mask_f)
++
++    is_kl_row = g.sum(dim=-1) > 0.0          # (B,) -- any anchored supervised token in this row
++    is_ce_row = ~is_kl_row
++    n_ce_rows = is_ce_row.sum()
++    n_kl_rows = is_kl_row.sum()
++
++    ce_mask = is_ce_row.unsqueeze(-1).float() * mask_f
++    w = ce_mask if ce_weights is None else (ce_weights.float() * ce_mask)
++    ce = -(logp * w).sum() / w.sum().clamp(min=1e-6)
++
++    d = (ref_logp - logp).clamp(-20.0, 8.0)
++    kl = torch.exp(d) - d - 1.0
++    # `g` is already 0 outside KL rows (gamma is expected to be 0 on CE-row tokens by construction
++    # of the side-car), but the KL-row mask is applied again here so a mis-built gamma side-car
++    # cannot leak a KL contribution through a row this function itself classified as CE.
++    kl_g = g * is_kl_row.unsqueeze(-1).float()
++    kl_term = (kl * kl_g).sum() / kl_g.sum().clamp(min=1e-6)
++
++    loss = ce + float(beta) * kl_term
++    return loss, ce, kl_term, n_ce_rows, n_kl_rows
++
++
+ def pad_token_weights(rows, length: int, padding_side: str = "right") -> "torch.Tensor":
+     r"""Pad per-sample weight lists to `length` with 0.0, on `padding_side`.
+ 
+--- a/src/llamafactory/train/sft/trainer.py
++++ b/src/llamafactory/train/sft/trainer.py
+@@ -29,6 +29,11 @@
+ from ...data.processor.tw_token_weights import (
+     kl_gamma_enabled,  # TimeWarp: all no-ops unless TW_TOKEN_WEIGHTS is set
+     applied_weight_sum,
++    assert_disjoint_requires_gamma,
++    disjoint_kl_loss,
++    kl_disjoint_enabled,
++    kl_tail_logits_enabled,
++    supervised_tail_start,
+     normalization_mode,
+     token_weights_enabled,
+     valid_token_count,
+@@ -188,6 +193,18 @@
+         self._tw_kl_as_gamma = os.environ.get("TW_KL_AS_GAMMA", "0") == "1"
+         self._tw_kl_ref_path = os.environ.get("TW_KL_REF", "")
+         self._tw_kl_ref = None
++        # Ablation K (off-domain KL anchor, scout_task_plan.md 10.2): TW_KL_DISJOINT=1 makes each
++        # ROW contribute CE xor KL (never both, never a diluted mix of the two under the OLD
++        # micro-batch-weight-sum formula -- see disjoint_kl_loss's docstring for the regression this
++        # closes). Checked unconditionally (not only under TW_KL_BETA > 0) so a misconfigured
++        # TW_KL_DISJOINT=1 fails at construction rather than silently doing nothing.
++        self._tw_kl_disjoint = kl_disjoint_enabled()
++        # TW_KL_TAIL_LOGITS=1: compute logits only from the first supervised token onward (see
++        # supervised_tail_start). Same arithmetic, a fraction of the memory. Default off.
++        self._tw_kl_tail_logits = kl_tail_logits_enabled()
++        assert_disjoint_requires_gamma(
++            self._tw_kl_disjoint, kl_gamma_enabled(), self._tw_kl_beta
++        )
+         if self._tw_kl_beta > 0.0:
+             if not self._tw_kl_ref_path:
+                 raise ValueError("TW_KL_BETA is set but TW_KL_REF (the base-policy checkpoint) is not")
+@@ -366,8 +383,32 @@
+         gamma = wcol if self._tw_kl_as_gamma else gcol
+         ce_w = None if self._tw_kl_as_gamma else wcol
+ 
+-        outputs = model(**inputs)
++        # TAIL LOGITS (first real GPU run of ablation K, 2026-09-19). At cutoff 65536 a wiki sample is
++        # ~38k tokens, almost all of it the unsupervised AXTree prompt. Full-sequence logits on this
++        # 248k-token vocabulary are 17.5 GB in bf16 for the student, the same again for the reference,
++        # and _tw_target_logprobs upcasts to fp32: a single 34.9 GiB allocation that OOMs an 80 GB
++        # card (every unit with wiki on either side died at step ~6). Only SUPERVISED positions enter
++        # the loss, and they sit at the end of the sequence, so with TW_KL_TAIL_LOGITS=1 the forward is
++        # asked for logits from the position that predicts the first supervised token onward
++        # (HF `logits_to_keep`), and labels / gamma / CE weights are cut to the same window. Every
++        # supervised token keeps exactly the logits it had, so ce and kl are unchanged; only the
++        # memory (and the lm_head compute on the prompt) goes away.
++        tail_kw = {}
++        if self._tw_kl_tail_logits:
++            start = supervised_tail_start(labels)
++            if start > 0:
++                tail_kw = {"logits_to_keep": int(labels.size(-1) - start)}
++                labels = labels[..., start:]
++                gamma = None if gamma is None else gamma[..., start:]
++                ce_w = None if ce_w is None else ce_w[..., start:]
++
++        outputs = model(**inputs, **tail_kw)
+         logits = outputs["logits"] if isinstance(outputs, dict) else outputs[0]
++        if tail_kw and logits.size(-2) != labels.size(-1):
++            raise ValueError(
++                f"TW_KL_TAIL_LOGITS: asked for the last {labels.size(-1)} positions but the model returned "
++                f"{logits.size(-2)} -- this model ignores logits_to_keep; unset TW_KL_TAIL_LOGITS"
++            )
+ 
+         shift_logits = logits[..., :-1, :]
+         shift_labels = labels[..., 1:]
+@@ -387,11 +428,28 @@
+         with torch.no_grad():
+             ref = self._get_tw_kl_ref(logits.device)
+             ref_out = ref(
+-                input_ids=inputs["input_ids"], attention_mask=inputs.get("attention_mask", None)
++                input_ids=inputs["input_ids"], attention_mask=inputs.get("attention_mask", None), **tail_kw
+             )
+             ref_logits = (ref_out["logits"] if isinstance(ref_out, dict) else ref_out[0])[..., :-1, :]
+             ref_logp = self._tw_target_logprobs(ref_logits, shift_labels, mask)
+ 
++        if self._tw_kl_disjoint:
++            # Ablation K: each ROW is CE-only or KL-only (disjoint_kl_loss), not a per-token blend --
++            # see that function's docstring for why the non-disjoint formula below silently trains an
++            # "anchored" row at full CE strength under TW_TOKEN_WEIGHTS-style epsilon weights.
++            shift_gamma = None if gamma is None else gamma[..., 1:].float()
++            shift_ce_w = None if ce_w is None else ce_w[..., 1:].float()
++            loss, ce, kl_term, n_ce_rows, n_kl_rows = disjoint_kl_loss(
++                logp, ref_logp, mask, shift_gamma, shift_ce_w, self._tw_kl_beta
++            )
++            if self.state.global_step % 10 == 0:
++                logger.info_rank0(
++                    f"[tw-kl] step={self.state.global_step} ce={ce.item():.4f} "
++                    f"kl={kl_term.item():.4f} ce_rows={int(n_ce_rows.item())} kl_rows={int(n_kl_rows.item())}"
++                )
++
++            return (loss, outputs) if return_outputs else loss
++
+         # clamp before exp: d is ~0 at init (pi_theta IS pi_ref) and goes negative as the student
+         # learns the corpus, where k3 grows linearly and is harmless. The positive tail is the one
+         # that can overflow, and it is not the direction the penalty exists to control.

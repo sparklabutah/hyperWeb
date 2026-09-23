@@ -1,0 +1,38 @@
+# Experiment outputs: checkpoints, captures, corpora, eval dumps, logs.
+# Large and regenerable -- deliberately not tracked.
+out/
+logs/
+*.log
+
+# Model / adapter artefacts
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+adapter_model*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Local scratch
+.DS_Store
+*.swp
+tmp/
+scratch/
+
+# Local datasets, staging state, and generated reports
+data/
+.lmf_stage/
+.pytest_cache/
+*.bak*
+*FINDINGS*.md
+*RESULTS*.md
+*STATUS*.md
+*HANDOFF*.md
+*PLAN*.md
+*.sbatch

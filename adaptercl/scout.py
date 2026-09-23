@@ -922,8 +922,8 @@ def leak_check(text, sections="full", labels=(), task_intents=(), ngram=6,
     # when it also happens to be an observed UI label.
     # RULE 6 IS SPLIT, and the split is structural rather than a tuned heuristic (2026-09-19).
     #
-    # `answer_strings` (HARD, rule 6): answers of the tasks the scout ACTUALLY ATTEMPTED. At level
-    # T2 the scout was shown their recipes, so it can restate an answer it was told -- the real
+    # `answer_strings` (HARD, rule 6): answers of the tasks the scout ACTUALLY ATTEMPTED. The
+    # scout was shown their recipes, so it can restate an answer it was told -- the real
     # leak this gate exists to catch, and the one a reviewer demonstrated with task 108's recipe.
     # No waiver: an observed UI label that happens to equal a scouted answer is still a restatement.
     #
@@ -1323,7 +1323,11 @@ def run_identity_probe(npz_path=None, root=None, variant="full", seed=0):
 # `OUT_CRAWL`, so the task-free scout above is completely unaffected.
 # --------------------------------------------------------------------------
 
-TASK_LEVELS = ("T1", "T2")
+#: The one scouting level: the scout sees each picked task's intent AND its
+#: answer-stripped recipe. The intent-only level (T1) was removed; the name is
+#: kept because it prefixes every cell directory and is recorded in
+#: tasks.json / gates.json, so cells written before the removal still resolve.
+TASK_LEVEL = "T2"
 
 #: Bumped whenever `pick_tasks`'s draw algorithm changes, so a `tasks.json`
 #: written by an old picker is visibly stale rather than silently reused.
@@ -1342,7 +1346,7 @@ WORKED_EXAMPLES_SECTION = (8, "Worked examples")
 # campaign keep its own scout cells side by side with another's -- the ICL
 # campaign scouts TWICE, once per eval backbone (Qwen3.5-4B and
 # Llama-3.1-8B-Instruct each write their own manual), and both would
-# otherwise collide on `out/scout/task/v6/<site>/<level>_k<k>_d<d>`.
+# otherwise collide on `out/scout/task/v6/<site>/T2_k<k>_d<d>`.
 # Unset => byte-identical to the pre-campaign default.
 OUT_TASK = os.environ.get("ADAPTERCL_TASK_ROOT") or os.path.join(
     OUT_SCOUT, "task")
@@ -1356,10 +1360,10 @@ def task_site_dir(era, site, root=None):
     return os.path.join(task_version_dir(era, root), site)
 
 
-def task_draw_dir(era, site, level, k, draw, root=None):
-    """C3: `out/scout/task/v<era>/<site>/<level>_k<k>_d<d>/`."""
+def task_draw_dir(era, site, k, draw, root=None):
+    """C3: `out/scout/task/v<era>/<site>/T2_k<k>_d<d>/`."""
     return os.path.join(task_site_dir(era, site, root),
-                        "%s_k%d_d%d" % (level, int(k), int(draw)))
+                        "%s_k%d_d%d" % (TASK_LEVEL, int(k), int(draw)))
 
 
 def read_jsonl(path):
@@ -1474,13 +1478,9 @@ def pick_tasks(site, k, draw, rows, exclude_ids=()):
     `exclude_ids` (new, optional, defaults to `()` so every existing caller
     is byte-identical -- HARD RULE 5) removes those task ids from the
     candidate pool BEFORE the seeded shuffle, so a task in it can never be
-    drawn at any k or draw for this site. Applied identically regardless of
-    `level` -- this function has no `level` argument at all, which is what
-    makes T1 and T2 scout the SAME (site, draw) pool a structural property
-    rather than something a caller has to get right (campaign rule: DOMSCOUT
-    scout draw). The id-convention check below runs on the FULL split-tagged
-    pool, before exclusion, so a broken id is still caught even if the
-    offending row happens to also be in `exclude_ids`.
+    drawn at any k or draw for this site. The id-convention check below runs
+    on the FULL split-tagged pool, before exclusion, so a broken id is still
+    caught even if the offending row happens to also be in `exclude_ids`.
 
     Hard errors, never a silently short or wrong draw:
     * `site` is not a known single-site group;
@@ -1547,7 +1547,7 @@ def _train_task_rows(task_data=None):
     return rows
 
 
-def build_task_pick_result(site, era, level, k, draw, task_data=None,
+def build_task_pick_result(site, era, k, draw, task_data=None,
                            exclude_leaky=False, exclude_intent_overlap=False):
     """The pure core of `task-pick`: `tasks.json`'s content, computed but
     never written. Split out from `cmd_task_pick` so a test can exercise the
@@ -1557,10 +1557,7 @@ def build_task_pick_result(site, era, level, k, draw, task_data=None,
     `_train_task_rows` / `_load_recipes` / `task_reference_answers`.
 
     `exclude_leaky` (DOMSCOUT_KL_RUN_PLAN.md / section 11 DO item 1) is
-    computed on the WHOLE site pool, identically for every `level` -- this
-    function's own exclusion step never looks at `level` at all, which is
-    what makes "T1 and T2 scout the SAME (site, draw) pool" a structural
-    property rather than something a caller has to get right.
+    computed on the WHOLE site pool, before `pick_tasks` narrows it.
     """
     exclude_leaky = bool(exclude_leaky)
     exclude_intent_overlap = bool(exclude_intent_overlap)
@@ -1596,7 +1593,7 @@ def build_task_pick_result(site, era, level, k, draw, task_data=None,
     picked = pick_tasks(site, k, draw, rows, exclude_ids=excluded_ids)
     pool_after = pool_before - len(excluded_ids)
     return collections.OrderedDict([
-        ("site", site), ("era", int(era)), ("level", level),
+        ("site", site), ("era", int(era)), ("level", TASK_LEVEL),
         ("k", int(k)), ("draw", int(draw)), ("seed", int(draw)),
         ("picker_version", PICKER_VERSION),
         ("exclude_leaky", exclude_leaky),
@@ -1612,12 +1609,12 @@ def build_task_pick_result(site, era, level, k, draw, task_data=None,
 def cmd_task_pick(args):
     exclude_leaky = bool(getattr(args, "exclude_leaky", False))
     excl_overlap = bool(getattr(args, "exclude_intent_overlap", False))
-    out = build_task_pick_result(args.site, args.era, args.level, args.k,
+    out = build_task_pick_result(args.site, args.era, args.k,
                                  args.draw, task_data=args.task_data,
                                  exclude_leaky=exclude_leaky,
                                  exclude_intent_overlap=excl_overlap)
     picked = out["tasks"]
-    d = task_draw_dir(args.era, args.site, args.level, args.k, args.draw)
+    d = task_draw_dir(args.era, args.site, args.k, args.draw)
     path = write_json(os.path.join(d, "tasks.json"), out)
     print("  wrote %s (%d task(s): %s)%s"
           % (path, len(picked), ", ".join(str(t["task_id"]) for t in picked),
@@ -1631,7 +1628,7 @@ def cmd_task_pick(args):
 # --------------------------------------------------------------------------
 # task-subset (DOMSCOUT_KL_RUN_PLAN.md "How many examples the scout sees" /
 # section 11 DO item 5b): the k in {1, 3, 5} ablation is built from ONE set
-# of k=5 scout episodes per (site, draw, level) -- this command carves a
+# of k=5 scout episodes per (site, draw) -- this command carves a
 # smaller-k CELL out of that k=5 PARENT cell, so k=1/3/5 differ only in how
 # many of the same five attempts their manual distils, never in which tasks
 # were attempted or how.
@@ -1703,14 +1700,13 @@ def cmd_task_subset(args):
     if k > from_k:
         raise SystemExit(
             "task-subset: --k %d > --from-k %d" % (k, from_k))
-    parent_dir = task_draw_dir(args.era, args.site, args.level, from_k,
-                               args.draw)
+    parent_dir = task_draw_dir(args.era, args.site, from_k, args.draw)
     parent_tasks_path = os.path.join(parent_dir, "tasks.json")
     if not os.path.exists(parent_tasks_path):
         raise SystemExit(
             "task-subset: parent cell missing -- %s not found (run "
-            "task-pick --k %d --draw %d --site %s --level %s first)"
-            % (parent_tasks_path, from_k, args.draw, args.site, args.level))
+            "task-pick --k %d --draw %d --site %s first)"
+            % (parent_tasks_path, from_k, args.draw, args.site))
     parent = json.load(open(parent_tasks_path))
     parent_episodes_path = os.path.join(parent_dir, "episodes.jsonl")
     episodes = read_jsonl(parent_episodes_path)
@@ -1729,7 +1725,7 @@ def cmd_task_subset(args):
     _verify_subset_nesting(args.site, k, args.draw, rows, exclude_ids,
                            subset_ids)
 
-    d = task_draw_dir(args.era, args.site, args.level, k, args.draw)
+    d = task_draw_dir(args.era, args.site, k, args.draw)
     write_json(os.path.join(d, "tasks.json"), result)
 
     # episodes.jsonl: filtered to the subset ids, IN THE PARENT FILE'S OWN
@@ -1874,8 +1870,7 @@ def build_task_scout_cost(tasks, episodes, steps_dir=None, crawl=None):
     """`scout_cost.json` for one task-draw dir.
 
     `reward` -- the verifier outcome -- is recorded HERE ONLY (C1 / section
-    4): it must never reach `task-summarize`'s prompt except at level `T1v`,
-    which this module does not build a prompt path for.
+    4): it must never reach `task-summarize`'s prompt.
     """
     by_task = dict((r.get("task_id"), r) for r in episodes)
     rows = []
@@ -1900,7 +1895,7 @@ def build_task_scout_cost(tasks, episodes, steps_dir=None, crawl=None):
 
 
 def cmd_task_collect(args):
-    d = task_draw_dir(args.era, args.site, args.level, args.k, args.draw)
+    d = task_draw_dir(args.era, args.site, args.k, args.draw)
     tasks_path = os.path.join(d, "tasks.json")
     if not os.path.exists(tasks_path):
         raise SystemExit(
@@ -1949,8 +1944,9 @@ def cmd_task_collect(args):
 
 
 # --------------------------------------------------------------------------
-# strip_answer_from_recipe -- the one thing standing between T2's recipe and
-# the reference answer it ends with (section 3 / section 11 WHAT TO BUILD).
+# strip_answer_from_recipe -- the one thing standing between a scouted task's
+# recipe and the reference answer it ends with (section 3 / section 11 WHAT
+# TO BUILD).
 # --------------------------------------------------------------------------
 
 _TASK_STEP_RE = re.compile(r"(?m)^(\s*\d+\.\s)")
@@ -2050,6 +2046,8 @@ def strip_answer_from_recipe(text, answer_strings=()):
 # task-summarize
 # --------------------------------------------------------------------------
 
+# "at level T2" predates the removal of T1 and is kept verbatim: this string is
+# part of the summariser prompt, so editing it would change every T2 manual.
 TASK_SUMMARY_RULES_EXTRA = (
     "* You are ALSO given the task(s) the scout was assigned when it produced "
     "this crawl: each one's INTENT, and at level T2 an answer-stripped recipe "
@@ -2064,25 +2062,29 @@ def _indent(text, prefix="    "):
     return "\n".join(prefix + ln for ln in text.splitlines())
 
 
-def _task_context_block(tasks_meta, level, recipes=None):
-    """The scouted-task context appended to the summariser's prompt: intents
-    always, answer-stripped recipe steps only at level T2. The reward and the
-    answer must never appear here -- `recipes`, if passed, is expected to
-    already be the `strip_answer_from_recipe` output."""
+def _task_context_block(tasks_meta, recipes):
+    """The scouted-task context appended to the summariser's prompt: each
+    task's intent, then its answer-stripped recipe steps. The reward and the
+    answer must never appear here -- `recipes` is expected to already be the
+    `strip_answer_from_recipe` output. A task with no recipe on file gets
+    its intent only."""
     lines = []
     for t in tasks_meta:
         lines.append("- task %s intent: %s"
                      % (t["task_id"], t.get("intent") or ""))
-        if level == "T2" and recipes and recipes.get(t["task_id"]):
+        if recipes.get(t["task_id"]):
             lines.append("  recipe steps:")
             lines.append(_indent(recipes[t["task_id"]]))
     return "\n".join(lines)
 
 
-def summarize_task_crawl(crawl, tasks_meta, level, endpoint=None, model=None,
-                         summarizer=None, recipes=None):
-    """`crawl.json` (+ scouted intents, + T2 answer-stripped recipes) ->
+def summarize_task_crawl(crawl, tasks_meta, recipes, endpoint=None,
+                         model=None, summarizer=None):
+    """`crawl.json` + scouted intents + answer-stripped recipes ->
     (sections 1-7, normalised exactly like `summarize_crawl`, usage dict).
+
+    `recipes` (`{task_id: stripped recipe}`) is required: an intent-only
+    manual is the removed T1 level, so it cannot be produced by omission.
 
     Section 8 is NOT written here -- it is deterministic (`build_worked_
     examples`), never an LLM's to phrase, so it cannot accidentally restate
@@ -2090,10 +2092,7 @@ def summarize_task_crawl(crawl, tasks_meta, level, endpoint=None, model=None,
     `f(system, user) -> (text, usage)` override, exactly like
     `summarize_crawl`'s, so a test needs no server.
     """
-    if level not in TASK_LEVELS:
-        raise ValueError("summarize_task_crawl: level must be one of %r, "
-                         "got %r" % (TASK_LEVELS, level))
-    context = _task_context_block(tasks_meta, level, recipes=recipes)
+    context = _task_context_block(tasks_meta, recipes)
     crawl_text = render_crawl_for_prompt(crawl)
     if context:
         crawl_text = crawl_text + "\n\nScouted task(s):\n" + context
@@ -2266,7 +2265,7 @@ def normalize_task_manual(sections_1_7, tasks_meta, steps_by_task):
 
 
 def cmd_task_summarize(args):
-    d = task_draw_dir(args.era, args.site, args.level, args.k, args.draw)
+    d = task_draw_dir(args.era, args.site, args.k, args.draw)
     tasks_path = os.path.join(d, "tasks.json")
     crawl_path = os.path.join(d, "crawl.json")
     if not os.path.exists(tasks_path):
@@ -2286,19 +2285,17 @@ def cmd_task_summarize(args):
     for t in tasks_meta:
         sp = os.path.join(d, "steps", "%s.jsonl" % t["task_id"])
         steps_by_task[t["task_id"]] = read_jsonl(sp)
-    recipes = None
-    if args.level == "T2":
-        raw = _load_recipes([t["task_id"] for t in tasks_meta], args.task_data)
-        answers = task_reference_answers(
-            task_ids=[t["task_id"] for t in tasks_meta], task_data=args.task_data)
-        recipes = dict((tid, strip_answer_from_recipe(
-                           txt, answer_strings=answers.get(tid) or ()))
-                      for tid, txt in raw.items())
+    task_ids = [t["task_id"] for t in tasks_meta]
+    raw = _require_recipes("task-summarize", task_ids, args.task_data)
+    answers = task_reference_answers(task_ids=task_ids,
+                                     task_data=args.task_data)
+    recipes = dict((tid, strip_answer_from_recipe(
+                       txt, answer_strings=answers.get(tid) or ()))
+                  for tid, txt in raw.items())
     if not _need_go("task-summarize %s against %s" % (d, args.endpoint)):
         return 0
     sections_1_7, usage = summarize_task_crawl(
-        crawl, tasks_meta, args.level, endpoint=args.endpoint,
-        model=args.model, recipes=recipes)
+        crawl, tasks_meta, recipes, endpoint=args.endpoint, model=args.model)
     manual = normalize_task_manual(sections_1_7, tasks_meta, steps_by_task)
     write_text(os.path.join(d, "manual.md"), manual)
     cost_path = os.path.join(d, "scout_cost.json")
@@ -2311,7 +2308,7 @@ def cmd_task_summarize(args):
 
 
 # --------------------------------------------------------------------------
-# task-paste (the paste control: XP1 / XP2)
+# task-paste (the paste control: XP2)
 # --------------------------------------------------------------------------
 
 def _load_recipes(task_ids, task_data=None):
@@ -2335,37 +2332,47 @@ def _load_recipes(task_ids, task_data=None):
     return out
 
 
-def build_paste_block(tasks_meta, level, recipes=None,
-                      answer_strings_by_task=None):
-    """paste.md: the k intents (T1) or intents + answer-stripped recipes
-    (T2), as a manual-shaped block with NO scouting content -- the paste
-    control (section 9 / C4 `XP1`/`XP2`). `recipes`, if passed, are stripped
-    with `strip_answer_from_recipe` here (callers pass the RAW recipe text).
+def _require_recipes(cmd, task_ids, task_data=None):
+    """`_load_recipes`, but a hard error if any scouted task has no recipe on
+    file. Without this, a missing or partial task file would silently yield
+    an intent-only manual or paste -- the removed T1 level under a T2 name
+    (HARD RULE 7)."""
+    recipes = _load_recipes(task_ids, task_data)
+    missing = [tid for tid in task_ids if not recipes.get(tid)]
+    if missing:
+        raise RuntimeError(
+            "%s: no recipe (`additional_instructions`) on file for scouted "
+            "task(s) %r in %s -- refusing to write an intent-only output"
+            % (cmd, missing, task_data or paths.TASK_DATA_DETERMINISTIC))
+    return recipes
+
+
+def build_paste_block(tasks_meta, recipes, answer_strings_by_task=None):
+    """paste.md: the k intents + answer-stripped recipes, as a manual-shaped
+    block with NO scouting content -- the paste control (section 9 / C4
+    `XP2`). `recipes` (required) are stripped with `strip_answer_from_recipe`
+    here (callers pass the RAW recipe text).
     `answer_strings_by_task` (optional, `{task_id: [answer strings]}`,
     typically `task_reference_answers()`'s output) is threaded through to
     `strip_answer_from_recipe` so an answer restated OUTSIDE the narrow
     "to the user" sentence is still caught; omitting it preserves the old,
     narrower behaviour byte-for-byte (HARD RULE 5)."""
-    if level not in TASK_LEVELS:
-        raise ValueError("build_paste_block: level must be one of %r, got %r"
-                         % (TASK_LEVELS, level))
     lines = ["# Task examples"]
     for t in tasks_meta:
         lines.append("")
         lines.append("Task %s intent: %s"
                      % (t["task_id"], t.get("intent") or ""))
-        if level == "T2":
-            raw = (recipes or {}).get(t["task_id"]) or ""
-            ans = (answer_strings_by_task or {}).get(t["task_id"]) or ()
-            stripped = strip_answer_from_recipe(raw, answer_strings=ans).strip()
-            if stripped:
-                lines.append("Steps:")
-                lines.append(stripped)
+        raw = recipes.get(t["task_id"]) or ""
+        ans = (answer_strings_by_task or {}).get(t["task_id"]) or ()
+        stripped = strip_answer_from_recipe(raw, answer_strings=ans).strip()
+        if stripped:
+            lines.append("Steps:")
+            lines.append(stripped)
     return "\n".join(lines).strip() + "\n"
 
 
 def cmd_task_paste(args):
-    d = task_draw_dir(args.era, args.site, args.level, args.k, args.draw)
+    d = task_draw_dir(args.era, args.site, args.k, args.draw)
     tasks_path = os.path.join(d, "tasks.json")
     if not os.path.exists(tasks_path):
         raise SystemExit(
@@ -2375,14 +2382,11 @@ def cmd_task_paste(args):
     if not tasks_meta:
         raise RuntimeError(
             "task-paste: %s has no scouted tasks" % tasks_path)
-    recipes = None
-    answers = None
-    if args.level == "T2":
-        recipes = _load_recipes([t["task_id"] for t in tasks_meta],
-                                args.task_data)
-        answers = task_reference_answers(
-            task_ids=[t["task_id"] for t in tasks_meta], task_data=args.task_data)
-    text = build_paste_block(tasks_meta, args.level, recipes=recipes,
+    task_ids = [t["task_id"] for t in tasks_meta]
+    recipes = _require_recipes("task-paste", task_ids, args.task_data)
+    answers = task_reference_answers(task_ids=task_ids,
+                                     task_data=args.task_data)
+    text = build_paste_block(tasks_meta, recipes,
                              answer_strings_by_task=answers)
     path = write_text(os.path.join(d, "paste.md"), text)
     print("  wrote %s (%d chars)" % (path, len(text)))
@@ -2680,7 +2684,7 @@ def gate_task_size(text, name):
 
 
 def cmd_task_gates(args):
-    d = task_draw_dir(args.era, args.site, args.level, args.k, args.draw)
+    d = task_draw_dir(args.era, args.site, args.k, args.draw)
     tasks_path = os.path.join(d, "tasks.json")
     if not os.path.exists(tasks_path):
         raise SystemExit(
@@ -2730,7 +2734,7 @@ def cmd_task_gates(args):
 
     out = collections.OrderedDict([
         ("gate", "task-gates"),
-        ("site", args.site), ("era", int(args.era)), ("level", args.level),
+        ("site", args.site), ("era", int(args.era)), ("level", TASK_LEVEL),
         ("k", int(args.k)), ("draw", int(args.draw)),
         ("size", size),
         ("leak", collections.OrderedDict([
@@ -3126,7 +3130,6 @@ def main(argv=None):
     task_common = argparse.ArgumentParser(add_help=False)
     task_common.add_argument("--site", required=True, choices=cells.ENVIRONMENTS)
     task_common.add_argument("--era", type=int, default=cells.NEUTRAL_ERA)
-    task_common.add_argument("--level", choices=TASK_LEVELS, default="T1")
     task_common.add_argument("--k", type=int, default=4)
     task_common.add_argument("--draw", type=int, required=True,
                              help="draw index; tied to the training seed (C3)")
@@ -3177,7 +3180,7 @@ def main(argv=None):
     ts.set_defaults(func=cmd_task_summarize)
 
     tpa = sub.add_parser("task-paste", parents=[task_common],
-                         help="intents (+ T2 answer-stripped recipes) -> paste.md")
+                         help="intents + answer-stripped recipes -> paste.md")
     tpa.set_defaults(func=cmd_task_paste)
 
     tg = sub.add_parser("task-gates", parents=[task_common],

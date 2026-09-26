@@ -15,6 +15,7 @@ This repository contains code and reproducible interfaces. It does not contain d
 | Adapter training and serving | `adaptercl/percell.py`, `adaptercl/train_hypernet.py`, `adaptercl/materialize.py`, `scripts/startVLM_lora.sh` | Train, export, verify, and serve adapters. |
 | Baselines | `scripts/run_baselines.sh`, `scripts/gen_yaml_fullft.py`, `scripts/gen_yaml_qlora.py`, `scripts/train_t2l.py` | Frozen model, pooled and nearest adapters, oracle adapter, full fine-tuning, QLoRA, and T2L code. |
 | Evaluation | `adaptercl/evalbridge.py`, `scripts/benchmark_adapter.py` | Interface to the TimeWarp evaluation harness. |
+| Proofs | `lean/` | Lean 4 + Mathlib proofs of the paper's theoretical results; see `lean/README.md`. |
 | Tests | `tests/` | CPU contracts for data, scouting, and adapter operations. |
 
 ## Setup

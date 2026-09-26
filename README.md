@@ -1,6 +1,4 @@
-# AdapterCL
-
-AdapterCL studies continual adaptation of a web agent with a bank of LoRA adapters. The main path trains adapters for sites or interface versions, uses a scout to describe an unseen interface, and routes or combines the adapter bank. An optional KL anchor regularizes each source adapter toward the frozen base policy on examples from another source site.
+# WebMix
 
 This repository contains code and reproducible interfaces. It does not contain datasets, checkpoints, run logs, or measured results.
 

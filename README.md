@@ -6,8 +6,6 @@
 
 [![project](https://img.shields.io/badge/Project%20Page-4285F4?style=flat&logo=homeassistant&logoColor=white&color=006A4E&labelColor=gray)](https://webmix-hyper.github.io)
 [![code](https://img.shields.io/badge/GitHub-sparklabutah/hyperweb-blue?logo=GitHub&labelColor=black)](https://github.com/sparklabutah/hyperweb)
-[![benchmark](https://img.shields.io/badge/Benchmark-TimeWarp-ffc107?logo=GitHub&labelColor=black)](https://github.com/sparklabutah/timewarp)
-
 </div>
 
 tldr. WebMix helps fine-tuned web agents reuse and combine the skills they have already learned, so they generalize to unseen web domains and to new versions of familiar interfaces without retraining. A **Scout** explores a web domain and writes a manual of how it works. A **Mixture Hypernetwork** reads the manual and mixes a bank of trained LoRA adapters into a single adapter. The **Web Agent** then acts on the domain with the mixed adapter. WebMix is built on the [TimeWarp](https://github.com/sparklabutah/timewarp) benchmark.

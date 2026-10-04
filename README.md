@@ -8,7 +8,7 @@
 [![code](https://img.shields.io/badge/GitHub-sparklabutah/hyperweb-blue?logo=GitHub&labelColor=black)](https://github.com/sparklabutah/hyperweb)
 </div>
 
-tldr. WebMix helps fine-tuned web agents reuse and combine the skills they have already learned, so they generalize to unseen web domains and to new versions of familiar interfaces without retraining. A **Scout** explores a web domain and writes a manual of how it works. A **Mixture Hypernetwork** reads the manual and mixes a bank of trained LoRA adapters into a single adapter. The **Web Agent** then acts on the domain with the mixed adapter. WebMix is built on the [TimeWarp](https://github.com/sparklabutah/timewarp) benchmark.
+tldr. WebMix helps fine-tuned web agents reuse and combine the skills they have already learned, so they generalize to unseen web domains and to new versions of familiar interfaces without retraining. A **Scout** explores a web domain and writes a manual of how it works. A **Mixture Hypernetwork** reads the manual and mixes a bank of trained LoRA adapters into a single adapter. The **Web Agent** then acts on the domain with the mixed adapter.
 
 > [!NOTE]
 > This repository contains code and reproducible interfaces. It does not contain datasets, checkpoints, run logs, or measured results.
@@ -52,7 +52,7 @@ Every stage runs through one entry point, `python -m adaptercl <stage>`, which r
 
 ### Environment Variables
 
-WebMix finds its neighboring TimeWarp checkouts (for example `TimeWarp/`, `BrowserGym-TimeWarp/`, and `LLaMA-Factory/`) from its parent directory. Override any of these when your setup differs:
+This code finds its neighboring TimeWarp checkouts (for example `TimeWarp/`, `BrowserGym-TimeWarp/`, and `LLaMA-Factory/`) from its parent directory. Override any of these when your setup differs:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -174,7 +174,7 @@ python tests/test_kl_disjoint.py
 
 ## 📏 Evaluating your Web Agent
 
-WebMix evaluates through the TimeWarp harness. Start the TimeWarp environments as described in the [TimeWarp README](https://github.com/sparklabutah/timewarp#-running-environments), then:
+The evaluation scripts in this repository run on the TimeWarp harness. Start its environments as described in the [TimeWarp README](https://github.com/sparklabutah/timewarp#-running-environments), then:
 
 **1. Serve the base model with an adapter.** [`startVLM_lora.sh`](scripts/startVLM_lora.sh) takes the same `--model` and `--port` flags as TimeWarp's `startVLMmodel.sh` and refuses to start if an adapter path is not a PEFT adapter:
 
@@ -227,40 +227,8 @@ lake env lean Audit.lean  # print the axioms each headline theorem depends on
 
 ## Citation
 
-Don't forget to cite all the repos that have helped us!
+If you find WebMix useful, please consider citing us! 😊
 
-### BrowserGym and AgentLab
-```bibtex
-@article{
-    chezelles2025browsergym,
-    title={The BrowserGym Ecosystem for Web Agent Research},
-    author={Thibault Le Sellier de Chezelles and Maxime Gasse and Alexandre Lacoste and Massimo Caccia and Alexandre Drouin and L{\'e}o Boisvert and Megh Thakkar and Tom Marty and Rim Assouel and Sahar Omidi Shayegan and Lawrence Keunho Jang and Xing Han L{\`u} and Ori Yoran and Dehan Kong and Frank F. Xu and Siva Reddy and Graham Neubig and Quentin Cappart and Russ Salakhutdinov and Nicolas Chapados},
-    journal={Transactions on Machine Learning Research},
-    issn={2835-8856},
-    year={2025},
-    url={https://openreview.net/forum?id=5298fKGmv3},
-    note={Expert Certification}
-}
-```
-
-### TimeWarp
-```bibtex
-@inproceedings{ishmam2026timewarp,
-  title         = {{TimeWarp}: Evaluating Web Agents by Revisiting the Past},
-  author        = {Ishmam, Md Farhan and Marino, Kenneth},
-  booktitle     = {Fortieth Conference on Neural Information Processing Systems Evaluations and Datasets Track},
-  year          = {2026},
-  note          = {To appear},
-  eprint        = {2603.04949},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.AI},
-  url           = {https://arxiv.org/abs/2603.04949}
-}
-```
-
-If you enjoyed using this repo, also consider citing us! 😊
-
-### WebMix
 ```bibtex
 @misc{ishmam2026webmix,
   title  = {Don't Retrain, Remix: Adaptation of Web Agents using Mixture Hypernetworks},

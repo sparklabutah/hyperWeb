@@ -91,6 +91,6 @@
    "inputRev": "v4.34.0-rc2",
    "inherited": true,
    "configFile": "lakefile.toml"}],
- "name": "MWSPO",
+ "name": "WebMix",
  "lakeDir": ".lake",
  "fixedToolchain": false}

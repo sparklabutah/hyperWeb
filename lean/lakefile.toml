@@ -1,10 +1,11 @@
-name = "Web2LoRA"
+name = "WebMix"
 version = "0.1.0"
 keywords = ["math"]
-defaultTargets = ["Web2LoRA"]
+defaultTargets = ["WebMix"]
 
 [leanOptions]
 pp.unicode.fun = true
+autoImplicit = false          # a typo must be an error, not a new universally quantified variable
 relaxedAutoImplicit = false
 weak.linter.mathlibStandardSet = false
 maxSynthPendingDepth = 3
@@ -15,4 +16,4 @@ scope = "leanprover-community"
 rev = "v4.34.0-rc2"
 
 [[lean_lib]]
-name = "Web2LoRA"
+name = "WebMix"

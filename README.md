@@ -5,6 +5,7 @@
 <div align="center">
 
 [![project](https://img.shields.io/badge/Project%20Page-4285F4?style=flat&logo=homeassistant&logoColor=white&color=006A4E&labelColor=gray)](https://webmix-hyper.github.io)
+[![arXiv](https://img.shields.io/badge/arXiv-2610.22539-b31b1b.svg?logo=arxiv&labelColor=FFFFFF&logoColor=b31b1b)](https://arxiv.org/abs/2610.22539)
 [![code](https://img.shields.io/badge/GitHub-sparklabutah/hyperweb-blue?logo=GitHub&labelColor=black)](https://github.com/sparklabutah/hyperweb)
 </div>
 
